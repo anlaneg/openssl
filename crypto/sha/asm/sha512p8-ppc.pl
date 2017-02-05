@@ -1,4 +1,11 @@
-#!/usr/bin/env perl
+#! /usr/bin/env perl
+# Copyright 2014-2016 The OpenSSL Project Authors. All Rights Reserved.
+#
+# Licensed under the OpenSSL license (the "License").  You may not use
+# this file except in compliance with the License.  You can obtain a copy
+# in the file LICENSE in the source distribution or at
+# https://www.openssl.org/source/license.html
+
 
 # ====================================================================
 # Written by Andy Polyakov <appro@openssl.org> for the OpenSSL
@@ -76,6 +83,7 @@ $lrsave="r8";
 $offload="r11";
 $vrsave="r12";
 ($x00,$x10,$x20,$x30,$x40,$x50,$x60,$x70)=map("r$_",(0,10,26..31));
+ $x00=0 if ($flavour =~ /osx/);
 
 @V=($A,$B,$C,$D,$E,$F,$G,$H)=map("v$_",(0..7));
 @X=map("v$_",(8..23));
