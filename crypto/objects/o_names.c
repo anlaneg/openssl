@@ -1,7 +1,7 @@
 /*
- * Copyright 1998-2016 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 1998-2022 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Licensed under the OpenSSL license (the "License").  You may not use
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
  * in the file LICENSE in the source distribution or at
  * https://www.openssl.org/source/license.html
@@ -16,27 +16,10 @@
 #include <openssl/objects.h>
 #include <openssl/safestack.h>
 #include <openssl/e_os2.h>
-#include "obj_lcl.h"
-
-/*
- * We define this wrapper for two reasons. Firstly, later versions of
- * DEC C add linkage information to certain functions, which makes it
- * tricky to use them as values to regular function pointers.
- * Secondly, in the EDK2 build environment, the strcmp function is
- * actually an external function (AsciiStrCmp) with the Microsoft ABI,
- * so we can't transparently assign function pointers to it.
- * Arguably the latter is a stupidity of the UEFI environment, but
- * since the wrapper solves the DEC C issue too, let's just use the
- * same solution.
- */
-#if defined(OPENSSL_SYS_VMS_DECC) || defined(OPENSSL_SYS_UEFI)
-static int obj_strcmp(const char *a, const char *b)
-{
-    return strcmp(a, b);
-}
-#else
-#define obj_strcmp strcmp
-#endif
+#include "internal/thread_once.h"
+#include "crypto/lhash.h"
+#include "obj_local.h"
+#include "internal/e_os.h"
 
 /*
  * I use the ex_data stuff to manage the identifiers for the obj_name_types
@@ -44,6 +27,7 @@ static int obj_strcmp(const char *a, const char *b)
  */
 static LHASH_OF(OBJ_NAME) *names_lh = NULL;
 static int names_type_num = OBJ_NAME_TYPE_NUM;
+static CRYPTO_RWLOCK *obj_lock = NULL;
 
 struct name_funcs_st {
     unsigned long (*hash_func) (const char *name);
@@ -62,53 +46,61 @@ static STACK_OF(NAME_FUNCS) *name_funcs_stack;
 static unsigned long obj_name_hash(const OBJ_NAME *a);
 static int obj_name_cmp(const OBJ_NAME *a, const OBJ_NAME *b);
 
+static CRYPTO_ONCE init = CRYPTO_ONCE_STATIC_INIT;
+DEFINE_RUN_ONCE_STATIC(o_names_init)
+{
+    names_lh = NULL;
+    obj_lock = CRYPTO_THREAD_lock_new();
+    if (obj_lock != NULL)
+        names_lh = lh_OBJ_NAME_new(obj_name_hash, obj_name_cmp);
+    if (names_lh == NULL) {
+        CRYPTO_THREAD_lock_free(obj_lock);
+        obj_lock = NULL;
+    }
+    return names_lh != NULL && obj_lock != NULL;
+}
+
 int OBJ_NAME_init(void)
 {
-    if (names_lh != NULL)
-        return (1);
-    CRYPTO_mem_ctrl(CRYPTO_MEM_CHECK_DISABLE);
-    names_lh = lh_OBJ_NAME_new(obj_name_hash, obj_name_cmp);
-    CRYPTO_mem_ctrl(CRYPTO_MEM_CHECK_ENABLE);
-    return (names_lh != NULL);
+    return RUN_ONCE(&init, o_names_init);
 }
 
 int OBJ_NAME_new_index(unsigned long (*hash_func) (const char *),
                        int (*cmp_func) (const char *, const char *),
                        void (*free_func) (const char *, int, const char *))
 {
-    int ret, i, push;
+    int ret = 0, i, push;
     NAME_FUNCS *name_funcs;
 
-    if (name_funcs_stack == NULL) {
-        CRYPTO_mem_ctrl(CRYPTO_MEM_CHECK_DISABLE);
+    if (!OBJ_NAME_init())
+        return 0;
+
+    if (!CRYPTO_THREAD_write_lock(obj_lock))
+        return 0;
+
+    if (name_funcs_stack == NULL)
         name_funcs_stack = sk_NAME_FUNCS_new_null();
-        CRYPTO_mem_ctrl(CRYPTO_MEM_CHECK_ENABLE);
-    }
     if (name_funcs_stack == NULL) {
         /* ERROR */
-        return (0);
+        goto out;
     }
     ret = names_type_num;
     names_type_num++;
     for (i = sk_NAME_FUNCS_num(name_funcs_stack); i < names_type_num; i++) {
-        CRYPTO_mem_ctrl(CRYPTO_MEM_CHECK_DISABLE);
         name_funcs = OPENSSL_zalloc(sizeof(*name_funcs));
-        CRYPTO_mem_ctrl(CRYPTO_MEM_CHECK_ENABLE);
         if (name_funcs == NULL) {
-            OBJerr(OBJ_F_OBJ_NAME_NEW_INDEX, ERR_R_MALLOC_FAILURE);
-            return (0);
+            ret = 0;
+            goto out;
         }
-        name_funcs->hash_func = OPENSSL_LH_strhash;
-        name_funcs->cmp_func = obj_strcmp;
-        CRYPTO_mem_ctrl(CRYPTO_MEM_CHECK_DISABLE);
-
+        name_funcs->hash_func = ossl_lh_strcasehash;
+        name_funcs->cmp_func = OPENSSL_strcasecmp;
         push = sk_NAME_FUNCS_push(name_funcs_stack, name_funcs);
-        CRYPTO_mem_ctrl(CRYPTO_MEM_CHECK_ENABLE);
 
         if (!push) {
-            OBJerr(OBJ_F_OBJ_NAME_NEW_INDEX, ERR_R_MALLOC_FAILURE);
+            ERR_raise(ERR_LIB_OBJ, ERR_R_CRYPTO_LIB);
             OPENSSL_free(name_funcs);
-            return 0;
+            ret = 0;
+            goto out;
         }
     }
     name_funcs = sk_NAME_FUNCS_value(name_funcs_stack, ret);
@@ -118,7 +110,10 @@ int OBJ_NAME_new_index(unsigned long (*hash_func) (const char *),
         name_funcs->cmp_func = cmp_func;
     if (free_func != NULL)
         name_funcs->free_func = free_func;
-    return (ret);
+
+out:
+    CRYPTO_THREAD_unlock(obj_lock);
+    return ret;
 }
 
 static int obj_name_cmp(const OBJ_NAME *a, const OBJ_NAME *b)
@@ -132,9 +127,9 @@ static int obj_name_cmp(const OBJ_NAME *a, const OBJ_NAME *b)
             ret = sk_NAME_FUNCS_value(name_funcs_stack,
                                       a->type)->cmp_func(a->name, b->name);
         } else
-            ret = strcmp(a->name, b->name);
+            ret = OPENSSL_strcasecmp(a->name, b->name);
     }
-    return (ret);
+    return ret;
 }
 
 static unsigned long obj_name_hash(const OBJ_NAME *a)
@@ -147,21 +142,24 @@ static unsigned long obj_name_hash(const OBJ_NAME *a)
             sk_NAME_FUNCS_value(name_funcs_stack,
                                 a->type)->hash_func(a->name);
     } else {
-        ret = OPENSSL_LH_strhash(a->name);
+        ret = ossl_lh_strcasehash(a->name);
     }
     ret ^= a->type;
-    return (ret);
+    return ret;
 }
 
 const char *OBJ_NAME_get(const char *name, int type)
 {
     OBJ_NAME on, *ret;
     int num = 0, alias;
+    const char *value = NULL;
 
     if (name == NULL)
-        return (NULL);
-    if ((names_lh == NULL) && !OBJ_NAME_init())
-        return (NULL);
+        return NULL;
+    if (!OBJ_NAME_init())
+        return NULL;
+    if (!CRYPTO_THREAD_read_lock(obj_lock))
+        return NULL;
 
     alias = type & OBJ_NAME_ALIAS;
     type &= ~OBJ_NAME_ALIAS;
@@ -172,38 +170,45 @@ const char *OBJ_NAME_get(const char *name, int type)
     for (;;) {
         ret = lh_OBJ_NAME_retrieve(names_lh, &on);
         if (ret == NULL)
-            return (NULL);
+            break;
         if ((ret->alias) && !alias) {
             if (++num > 10)
-                return (NULL);
+                break;
             on.name = ret->data;
         } else {
-            return (ret->data);
+            value = ret->data;
+            break;
         }
     }
+
+    CRYPTO_THREAD_unlock(obj_lock);
+    return value;
 }
 
 int OBJ_NAME_add(const char *name, int type, const char *data)
 {
     OBJ_NAME *onp, *ret;
-    int alias;
+    int alias, ok = 0;
 
-    if ((names_lh == NULL) && !OBJ_NAME_init())
-        return (0);
+    if (!OBJ_NAME_init())
+        return 0;
 
     alias = type & OBJ_NAME_ALIAS;
     type &= ~OBJ_NAME_ALIAS;
 
     onp = OPENSSL_malloc(sizeof(*onp));
-    if (onp == NULL) {
-        /* ERROR */
+    if (onp == NULL)
         return 0;
-    }
 
     onp->name = name;
     onp->alias = alias;
     onp->type = type;
     onp->data = data;
+
+    if (!CRYPTO_THREAD_write_lock(obj_lock)) {
+        OPENSSL_free(onp);
+        return 0;
+    }
 
     ret = lh_OBJ_NAME_insert(names_lh, onp);
     if (ret != NULL) {
@@ -223,18 +228,27 @@ int OBJ_NAME_add(const char *name, int type, const char *data)
         if (lh_OBJ_NAME_error(names_lh)) {
             /* ERROR */
             OPENSSL_free(onp);
-            return 0;
+            goto unlock;
         }
     }
-    return 1;
+
+    ok = 1;
+
+unlock:
+    CRYPTO_THREAD_unlock(obj_lock);
+    return ok;
 }
 
 int OBJ_NAME_remove(const char *name, int type)
 {
     OBJ_NAME on, *ret;
+    int ok = 0;
 
-    if (names_lh == NULL)
-        return (0);
+    if (!OBJ_NAME_init())
+        return 0;
+
+    if (!CRYPTO_THREAD_write_lock(obj_lock))
+        return 0;
 
     type &= ~OBJ_NAME_ALIAS;
     on.name = name;
@@ -253,9 +267,11 @@ int OBJ_NAME_remove(const char *name, int type)
                                                       ret->data);
         }
         OPENSSL_free(ret);
-        return (1);
-    } else
-        return (0);
+        ok = 1;
+    }
+
+    CRYPTO_THREAD_unlock(obj_lock);
+    return ok;
 }
 
 typedef struct {
@@ -363,8 +379,10 @@ void OBJ_NAME_cleanup(int type)
     if (type < 0) {
         lh_OBJ_NAME_free(names_lh);
         sk_NAME_FUNCS_pop_free(name_funcs_stack, name_funcs_free);
+        CRYPTO_THREAD_lock_free(obj_lock);
         names_lh = NULL;
         name_funcs_stack = NULL;
+        obj_lock = NULL;
     } else
         lh_OBJ_NAME_set_down_load(names_lh, down_load);
 }

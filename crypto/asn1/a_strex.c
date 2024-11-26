@@ -1,7 +1,7 @@
 /*
- * Copyright 2000-2016 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2000-2024 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Licensed under the OpenSSL license (the "License").  You may not use
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
  * in the file LICENSE in the source distribution or at
  * https://www.openssl.org/source/license.html
@@ -10,7 +10,8 @@
 #include <stdio.h>
 #include <string.h>
 #include "internal/cryptlib.h"
-#include "internal/asn1_int.h"
+#include "internal/sizes.h"
+#include "crypto/asn1.h"
 #include <openssl/crypto.h>
 #include <openssl/x509.h>
 #include <openssl/asn1.h>
@@ -32,7 +33,7 @@
                   ASN1_STRFLGS_ESC_MSB)
 
 /*
- * Three IO functions for sending data to memory, a BIO and and a FILE
+ * Three IO functions for sending data to memory, a BIO and a FILE
  * pointer.
  */
 static int send_bio_chars(void *arg, const void *buf, int len)
@@ -63,7 +64,7 @@ typedef int char_io (void *arg, const void *buf, int len);
  * even 4 byte forms.
  */
 
-static int do_esc_char(unsigned long c, unsigned char flags, char *do_quotes,
+static int do_esc_char(unsigned long c, unsigned short flags, char *do_quotes,
                        char_io *io_ch, void *arg)
 {
     unsigned short chflgs;
@@ -73,13 +74,13 @@ static int do_esc_char(unsigned long c, unsigned char flags, char *do_quotes,
     if (c > 0xffffffffL)
         return -1;
     if (c > 0xffff) {
-        BIO_snprintf(tmphex, sizeof tmphex, "\\W%08lX", c);
+        BIO_snprintf(tmphex, sizeof(tmphex), "\\W%08lX", c);
         if (!io_ch(arg, tmphex, 10))
             return -1;
         return 10;
     }
     if (c > 0xff) {
-        BIO_snprintf(tmphex, sizeof tmphex, "\\U%04lX", c);
+        BIO_snprintf(tmphex, sizeof(tmphex), "\\U%04lX", c);
         if (!io_ch(arg, tmphex, 6))
             return -1;
         return 6;
@@ -116,7 +117,7 @@ static int do_esc_char(unsigned long c, unsigned char flags, char *do_quotes,
      * If we get this far and do any escaping at all must escape the escape
      * character itself: backslash.
      */
-    if (chtmp == '\\' && flags & ESC_FLAGS) {
+    if (chtmp == '\\' && (flags & ESC_FLAGS)) {
         if (!io_ch(arg, "\\\\", 2))
             return -1;
         return 2;
@@ -139,19 +140,40 @@ static int do_buf(unsigned char *buf, int buflen,
                   int type, unsigned short flags, char *quotes, char_io *io_ch,
                   void *arg)
 {
-    int i, outlen, len;
+    int i, outlen, len, charwidth;
     unsigned short orflags;
     unsigned char *p, *q;
     unsigned long c;
+
     p = buf;
     q = buf + buflen;
     outlen = 0;
+    charwidth = type & BUF_TYPE_WIDTH_MASK;
+
+    switch (charwidth) {
+    case 4:
+        if (buflen & 3) {
+            ERR_raise(ERR_LIB_ASN1, ASN1_R_INVALID_UNIVERSALSTRING_LENGTH);
+            return -1;
+        }
+        break;
+    case 2:
+        if (buflen & 1) {
+            ERR_raise(ERR_LIB_ASN1, ASN1_R_INVALID_BMPSTRING_LENGTH);
+            return -1;
+        }
+        break;
+    default:
+        break;
+    }
+
     while (p != q) {
         if (p == buf && flags & ASN1_STRFLGS_ESC_2253)
             orflags = CHARTYPE_FIRST_ESC_2253;
         else
             orflags = 0;
-        switch (type & BUF_TYPE_WIDTH_MASK) {
+
+        switch (charwidth) {
         case 4:
             c = ((unsigned long)*p++) << 24;
             c |= ((unsigned long)*p++) << 16;
@@ -172,6 +194,7 @@ static int do_buf(unsigned char *buf, int buflen,
             i = UTF8_getc(p, buflen, &c);
             if (i < 0)
                 return -1;      /* Invalid UTF8String */
+            buflen -= i;
             p += i;
             break;
         default:
@@ -182,7 +205,7 @@ static int do_buf(unsigned char *buf, int buflen,
         if (type & BUF_TYPE_CONVUTF8) {
             unsigned char utfbuf[6];
             int utflen;
-            utflen = UTF8_putc(utfbuf, sizeof utfbuf, c);
+            utflen = UTF8_putc(utfbuf, sizeof(utfbuf), c);
             for (i = 0; i < utflen; i++) {
                 /*
                  * We don't need to worry about setting orflags correctly
@@ -190,17 +213,15 @@ static int do_buf(unsigned char *buf, int buflen,
                  * otherwise each character will be > 0x7f and so the
                  * character will never be escaped on first and last.
                  */
-                len =
-                    do_esc_char(utfbuf[i], (unsigned short)(flags | orflags),
-                                quotes, io_ch, arg);
+                len = do_esc_char(utfbuf[i], flags | orflags, quotes,
+                                  io_ch, arg);
                 if (len < 0)
                     return -1;
                 outlen += len;
             }
         } else {
-            len =
-                do_esc_char(c, (unsigned short)(flags | orflags), quotes,
-                            io_ch, arg);
+            len = do_esc_char(c, flags | orflags, quotes,
+                              io_ch, arg);
             if (len < 0)
                 return -1;
             outlen += len;
@@ -214,15 +235,14 @@ static int do_buf(unsigned char *buf, int buflen,
 static int do_hex_dump(char_io *io_ch, void *arg, unsigned char *buf,
                        int buflen)
 {
-    static const char hexdig[] = "0123456789ABCDEF";
     unsigned char *p, *q;
     char hextmp[2];
+
     if (arg) {
         p = buf;
         q = buf + buflen;
         while (p != q) {
-            hextmp[0] = hexdig[*p >> 4];
-            hextmp[1] = hexdig[*p & 0xf];
+            ossl_to_hex(hextmp, *p);
             if (!io_ch(arg, hextmp, 2))
                 return -1;
             p++;
@@ -260,8 +280,9 @@ static int do_dump(unsigned long lflags, char_io *io_ch, void *arg,
     t.type = str->type;
     t.value.ptr = (char *)str;
     der_len = i2d_ASN1_TYPE(&t, NULL);
-    der_buf = OPENSSL_malloc(der_len);
-    if (der_buf == NULL)
+    if (der_len <= 0)
+        return -1;
+    if ((der_buf = OPENSSL_malloc(der_len)) == NULL)
         return -1;
     p = der_buf;
     i2d_ASN1_TYPE(&t, &p);
@@ -281,12 +302,22 @@ static int do_dump(unsigned long lflags, char_io *io_ch, void *arg,
 static const signed char tag2nbyte[] = {
     -1, -1, -1, -1, -1,         /* 0-4 */
     -1, -1, -1, -1, -1,         /* 5-9 */
-    -1, -1, 0, -1,              /* 10-13 */
-    -1, -1, -1, -1,             /* 15-17 */
-    1, 1, 1,                    /* 18-20 */
-    -1, 1, 1, 1,                /* 21-24 */
-    -1, 1, -1,                  /* 25-27 */
-    4, -1, 2                    /* 28-30 */
+    -1, -1,                     /* 10-11 */
+     0,                         /* 12 V_ASN1_UTF8STRING */
+    -1, -1, -1, -1, -1,         /* 13-17 */
+     1,                         /* 18 V_ASN1_NUMERICSTRING */
+     1,                         /* 19 V_ASN1_PRINTABLESTRING */
+     1,                         /* 20 V_ASN1_T61STRING */
+    -1,                         /* 21 */
+     1,                         /* 22 V_ASN1_IA5STRING */
+     1,                         /* 23 V_ASN1_UTCTIME */
+     1,                         /* 24 V_ASN1_GENERALIZEDTIME */
+    -1,                         /* 25 */
+     1,                         /* 26 V_ASN1_ISO64STRING */
+    -1,                         /* 27 */
+     4,                         /* 28 V_ASN1_UNIVERSALSTRING */
+    -1,                         /* 29 */
+     2                          /* 30 V_ASN1_BMPSTRING */
 };
 
 /*
@@ -312,8 +343,10 @@ static int do_print_ex(char_io *io_ch, void *arg, unsigned long lflags,
 
     if (lflags & ASN1_STRFLGS_SHOW_TYPE) {
         const char *tagname;
+
         tagname = ASN1_tag2str(type);
-        outlen += strlen(tagname);
+        /* We can directly cast here as tagname will never be too large. */
+        outlen += (int)strlen(tagname);
         if (!io_ch(arg, tagname, outlen) || !io_ch(arg, ":", 1))
             return -1;
         outlen++;
@@ -339,7 +372,7 @@ static int do_print_ex(char_io *io_ch, void *arg, unsigned long lflags,
 
     if (type == -1) {
         len = do_dump(lflags, io_ch, arg, str);
-        if (len < 0)
+        if (len < 0 || len > INT_MAX - outlen)
             return -1;
         outlen += len;
         return outlen;
@@ -358,7 +391,7 @@ static int do_print_ex(char_io *io_ch, void *arg, unsigned long lflags,
     }
 
     len = do_buf(str->data, str->length, type, flags, &quotes, io_ch, NULL);
-    if (len < 0)
+    if (len < 0 || len > INT_MAX - 2 - outlen)
         return -1;
     outlen += len;
     if (quotes)
@@ -479,7 +512,7 @@ static int do_name_ex(char_io *io_ch, void *arg, const X509_NAME *n,
         if (fn_opt != XN_FLAG_FN_NONE) {
             int objlen, fld_len;
             if ((fn_opt == XN_FLAG_FN_OID) || (fn_nid == NID_undef)) {
-                OBJ_obj2txt(objtmp, sizeof objtmp, fn, 1);
+                OBJ_obj2txt(objtmp, sizeof(objtmp), fn, 1);
                 fld_len = 0;    /* XXX: what should this be? */
                 objbuf = objtmp;
             } else {
@@ -592,54 +625,4 @@ int ASN1_STRING_to_UTF8(unsigned char **out, const ASN1_STRING *in)
         return ret;
     *out = stmp.data;
     return stmp.length;
-}
-
-/* Return 1 if host is a valid hostname and 0 otherwise */
-int asn1_valid_host(const ASN1_STRING *host)
-{
-    int hostlen = host->length;
-    const unsigned char *hostptr = host->data;
-    int type = host->type;
-    int i;
-    signed char width = -1;
-    unsigned short chflags = 0, prevchflags;
-
-    if (type > 0 && type < 31)
-        width = tag2nbyte[type];
-    if (width == -1 || hostlen == 0)
-        return 0;
-    /* Treat UTF8String as width 1 as any MSB set is invalid */
-    if (width == 0)
-        width = 1;
-    for (i = 0 ; i < hostlen; i+= width) {
-        prevchflags = chflags;
-        /* Value must be <= 0x7F: check upper bytes are all zeroes */
-        if (width == 4) {
-            if (*hostptr++ != 0 || *hostptr++ != 0 || *hostptr++ != 0)
-                return 0;
-        } else if (width == 2) {
-            if (*hostptr++ != 0)
-                return 0;
-        }
-        if (*hostptr > 0x7f)
-            return 0;
-        chflags = char_type[*hostptr++];
-        if (!(chflags & (CHARTYPE_HOST_ANY | CHARTYPE_HOST_WILD))) {
-            /* Nothing else allowed at start or end of string */
-            if (i == 0 || i == hostlen - 1)
-                return 0;
-            /* Otherwise invalid if not dot or hyphen */
-            if (!(chflags & (CHARTYPE_HOST_DOT | CHARTYPE_HOST_HYPHEN)))
-                return 0;
-            /*
-             * If previous is dot or hyphen then illegal unless both
-             * are hyphens: as .- -. .. are all illegal
-             */
-            if (prevchflags & (CHARTYPE_HOST_DOT | CHARTYPE_HOST_HYPHEN)
-                && ((prevchflags & CHARTYPE_HOST_DOT)
-                    || (chflags & CHARTYPE_HOST_DOT)))
-                return 0;
-        }
-    }
-    return 1;
 }

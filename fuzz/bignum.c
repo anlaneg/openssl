@@ -1,7 +1,7 @@
 /*
- * Copyright 2016 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2016-2024 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Licensed under the OpenSSL licenses, (the "License");
+ * Licensed under the Apache License 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  * https://www.openssl.org/source/license.html
@@ -22,7 +22,7 @@
 int FuzzerInitialize(int *argc, char ***argv)
 {
     OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CRYPTO_STRINGS, NULL);
-    ERR_get_state();
+    ERR_clear_error();
 
     return 1;
 }
@@ -31,7 +31,7 @@ int FuzzerTestOneInput(const uint8_t *buf, size_t len)
 {
     int success = 0;
     size_t l1 = 0, l2 = 0, l3 = 0;
-    int s1 = 0, s2 = 0, s3 = 0;
+    int s1 = 0, s3 = 0;
     BN_CTX *ctx;
     BIGNUM *b1;
     BIGNUM *b2;
@@ -52,21 +52,20 @@ int FuzzerTestOneInput(const uint8_t *buf, size_t len)
      */
     if (len > 2) {
         len -= 3;
-        l1 = (buf[0] * len) / 255;
+        /* limit l1, l2, and l3 to be no more than 512 bytes */
+        l1 = ((buf[0] * len) / 255) % 512;
         ++buf;
-        l2 = (buf[0] * (len - l1)) / 255;
+        l2 = ((buf[0] * (len - l1)) / 255) % 512;
         ++buf;
-        l3 = len - l1 - l2;
+        l3 = (len - l1 - l2) % 512;
 
         s1 = buf[0] & 1;
-        s2 = buf[0] & 2;
         s3 = buf[0] & 4;
         ++buf;
     }
     OPENSSL_assert(BN_bin2bn(buf, l1, b1) == b1);
     BN_set_negative(b1, s1);
     OPENSSL_assert(BN_bin2bn(buf + l1, l2, b2) == b2);
-    BN_set_negative(b2, s2);
     OPENSSL_assert(BN_bin2bn(buf + l1 + l2, l3, b3) == b3);
     BN_set_negative(b3, s3);
 

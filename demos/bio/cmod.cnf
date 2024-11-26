@@ -4,8 +4,11 @@
 # and section containing configuration
 testapp = test_sect
 
+# Comment out the next line to ignore configuration errors
+config_diagnostics = 1
+
 [test_sect]
-# list of confuration modules
+# list of configuration modules
 
 # SSL configuration module
 ssl_conf = ssl_sect

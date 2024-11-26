@@ -1,7 +1,7 @@
 /*
  * Copyright 2016 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Licensed under the OpenSSL licenses, (the "License");
+ * Licensed under the Apache License 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  * https://www.openssl.org/source/license.html
@@ -17,6 +17,9 @@
 #include <openssl/bn.h>
 #include <openssl/err.h>
 #include "fuzzer.h"
+
+/* 256 kB */
+#define MAX_LEN (256 * 1000)
 
 static BN_CTX *ctx;
 static BIGNUM *b1;
@@ -35,7 +38,7 @@ int FuzzerInitialize(int *argc, char ***argv)
     ctx = BN_CTX_new();
 
     OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CRYPTO_STRINGS, NULL);
-    ERR_get_state();
+    ERR_clear_error();
 
     return 1;
 }
@@ -46,6 +49,10 @@ int FuzzerTestOneInput(const uint8_t *buf, size_t len)
     size_t l1 = 0, l2 = 0;
     /* s1 and s2 will be the signs for b1 and b2. */
     int s1 = 0, s2 = 0;
+
+    /* limit the size of the input to avoid timeout */
+    if (len > MAX_LEN)
+        len = MAX_LEN;
 
     /* We are going to split the buffer in two, sizes l1 and l2, giving b1 and
      * b2.

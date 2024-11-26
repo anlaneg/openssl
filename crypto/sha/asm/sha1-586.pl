@@ -1,7 +1,7 @@
 #! /usr/bin/env perl
-# Copyright 1998-2016 The OpenSSL Project Authors. All Rights Reserved.
+# Copyright 1998-2020 The OpenSSL Project Authors. All Rights Reserved.
 #
-# Licensed under the OpenSSL license (the "License").  You may not use
+# Licensed under the Apache License 2.0 (the "License").  You may not use
 # this file except in compliance with the License.  You can obtain a copy
 # in the file LICENSE in the source distribution or at
 # https://www.openssl.org/source/license.html
@@ -35,10 +35,9 @@
 # P4		+85%(!)			+45%
 #
 # As you can see Pentium came out as looser:-( Yet I reckoned that
-# improvement on P4 outweights the loss and incorporate this
+# improvement on P4 outweighs the loss and incorporate this
 # re-tuned code to 0.9.7 and later.
 # ----------------------------------------------------------------
-#					<appro@fy.chalmers.se>
 
 # August 2009.
 #
@@ -124,10 +123,9 @@ $0 =~ m/(.*[\/\\])[^\/\\]+$/; $dir=$1;
 push(@INC,"${dir}","${dir}../../perlasm");
 require "x86asm.pl";
 
-$output=pop;
-open STDOUT,">$output";
+$output=pop and open STDOUT,">$output";
 
-&asm_init($ARGV[0],"sha1-586.pl",$ARGV[$#ARGV] eq "386");
+&asm_init($ARGV[0],$ARGV[$#ARGV] eq "386");
 
 $xmm=$ymm=0;
 for (@ARGV) { $xmm=1 if (/-DOPENSSL_IA32_SSE2/); }
@@ -145,7 +143,7 @@ $ymm=1 if ($xmm && !$ymm && $ARGV[0] eq "win32" &&
 		`ml 2>&1` =~ /Version ([0-9]+)\./ &&
 		$1>=10);	# first version supporting AVX
 
-$ymm=1 if ($xmm && !$ymm && `$ENV{CC} -v 2>&1` =~ /(^clang version|based on LLVM) ([3-9]\.[0-9]+)/ &&
+$ymm=1 if ($xmm && !$ymm && `$ENV{CC} -v 2>&1` =~ /((?:clang|LLVM) version|based on LLVM) ([0-9]+\.[0-9]+)/ &&
 		$2>=3.0);	# first version supporting AVX
 
 $shaext=$xmm;	### set to zero if compiling for 1.0.1
@@ -550,7 +548,7 @@ for($i=0;$i<20-4;$i+=2) {
 # being implemented in SSSE3). Once 8 quadruples or 32 elements are
 # collected, it switches to routine proposed by Max Locktyukhin.
 #
-# Calculations inevitably require temporary reqisters, and there are
+# Calculations inevitably require temporary registers, and there are
 # no %xmm registers left to spare. For this reason part of the ring
 # buffer, X[2..4] to be specific, is offloaded to 3 quadriples ring
 # buffer on the stack. Keep in mind that X[2] is alias X[-6], X[3] -
@@ -661,7 +659,7 @@ my $_ror=sub { &ror(@_) };
 	&jmp	(&label("loop"));
 
 ######################################################################
-# SSE instruction sequence is first broken to groups of indepentent
+# SSE instruction sequence is first broken to groups of independent
 # instructions, independent in respect to their inputs and shifter
 # (not all architectures have more than one). Then IALU instructions
 # are "knitted in" between the SSE groups. Distance is maintained for
@@ -670,14 +668,14 @@ my $_ror=sub { &ror(@_) };
 #
 # Temporary registers usage. X[2] is volatile at the entry and at the
 # end is restored from backtrace ring buffer. X[3] is expected to
-# contain current K_XX_XX constant and is used to caclulate X[-1]+K
+# contain current K_XX_XX constant and is used to calculate X[-1]+K
 # from previous round, it becomes volatile the moment the value is
 # saved to stack for transfer to IALU. X[4] becomes volatile whenever
 # X[-4] is accumulated and offloaded to backtrace ring buffer, at the
 # end it is loaded with next K_XX_XX [which becomes X[3] in next
 # round]...
 #
-sub Xupdate_ssse3_16_31()		# recall that $Xi starts wtih 4
+sub Xupdate_ssse3_16_31()		# recall that $Xi starts with 4
 { use integer;
   my $body = shift;
   my @insns = (&$body,&$body,&$body,&$body);	# 40 instructions
@@ -1200,7 +1198,7 @@ my $_ror=sub { &shrd(@_[0],@_) };
 	&and	(@T[0],@T[1]);
 	&jmp	(&label("loop"));
 
-sub Xupdate_avx_16_31()		# recall that $Xi starts wtih 4
+sub Xupdate_avx_16_31()		# recall that $Xi starts with 4
 { use integer;
   my $body = shift;
   my @insns = (&$body,&$body,&$body,&$body);	# 40 instructions
@@ -1489,4 +1487,4 @@ sub Xtail_avx()
 
 &asm_finish();
 
-close STDOUT;
+close STDOUT or die "error closing STDOUT: $!";

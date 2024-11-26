@@ -1,35 +1,39 @@
 /*
- * Copyright 2004-2016 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2004-2021 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright (c) 2004, EdelKey Project. All Rights Reserved.
  *
- * Licensed under the OpenSSL license (the "License").  You may not use
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
  * in the file LICENSE in the source distribution or at
  * https://www.openssl.org/source/license.html
+ *
+ * Originally written by Christophe Renou and Peter Sylvester,
+ * for the EdelKey project.
  */
 
+/* SRP is deprecated, so we're going to have to use some deprecated APIs */
+#define OPENSSL_SUPPRESS_DEPRECATED
+
 #include <openssl/opensslconf.h>
-#ifdef OPENSSL_NO_SRP
-NON_EMPTY_TRANSLATION_UNIT
-#else
 
-# include <stdio.h>
-# include <stdlib.h>
-# include <string.h>
-# include <openssl/conf.h>
-# include <openssl/bio.h>
-# include <openssl/err.h>
-# include <openssl/txt_db.h>
-# include <openssl/buffer.h>
-# include <openssl/srp.h>
-# include "apps.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <openssl/conf.h>
+#include <openssl/bio.h>
+#include <openssl/err.h>
+#include <openssl/txt_db.h>
+#include <openssl/buffer.h>
+#include <openssl/srp.h>
+#include "apps.h"
+#include "progs.h"
 
-# define BASE_SECTION    "srp"
-# define CONFIG_FILE "openssl.cnf"
+#define BASE_SECTION    "srp"
+#define CONFIG_FILE "openssl.cnf"
 
-# define ENV_RANDFILE            "RANDFILE"
 
-# define ENV_DATABASE            "srpvfile"
-# define ENV_DEFAULT_SRP         "default_srp"
+#define ENV_DATABASE            "srpvfile"
+#define ENV_DEFAULT_SRP         "default_srp"
 
 static int get_index(CA_DB *db, char *id, char type)
 {
@@ -37,13 +41,14 @@ static int get_index(CA_DB *db, char *id, char type)
     int i;
     if (id == NULL)
         return -1;
-    if (type == DB_SRP_INDEX)
+    if (type == DB_SRP_INDEX) {
         for (i = 0; i < sk_OPENSSL_PSTRING_num(db->db->data); i++) {
             pp = sk_OPENSSL_PSTRING_value(db->db->data, i);
             if (pp[DB_srptype][0] == DB_SRP_INDEX
                 && strcmp(id, pp[DB_srpid]) == 0)
                 return i;
-    } else
+        }
+    } else {
         for (i = 0; i < sk_OPENSSL_PSTRING_num(db->db->data); i++) {
             pp = sk_OPENSSL_PSTRING_value(db->db->data, i);
 
@@ -51,6 +56,7 @@ static int get_index(CA_DB *db, char *id, char type)
                 && strcmp(id, pp[DB_srpid]) == 0)
                 return i;
         }
+    }
 
     return -1;
 }
@@ -92,10 +98,8 @@ static int update_index(CA_DB *db, char **row)
     int i;
 
     irow = app_malloc(sizeof(*irow) * (DB_NUMBER + 1), "row pointers");
-    for (i = 0; i < DB_NUMBER; i++) {
+    for (i = 0; i < DB_NUMBER; i++)
         irow[i] = row[i];
-        row[i] = NULL;
-    }
     irow[DB_NUMBER] = NULL;
 
     if (!TXT_DB_insert(db->db, irow)) {
@@ -119,32 +123,35 @@ static char *srp_verify_user(const char *user, const char *srp_verifier,
                              char *srp_usersalt, const char *g, const char *N,
                              const char *passin, int verbose)
 {
-    char password[1024];
+    char password[1025];
     PW_CB_DATA cb_tmp;
     char *verifier = NULL;
     char *gNid = NULL;
+    int len;
 
     cb_tmp.prompt_info = user;
     cb_tmp.password = passin;
 
-    if (password_callback(password, sizeof(password), 0, &cb_tmp) > 0) {
+    len = password_callback(password, sizeof(password)-1, 0, &cb_tmp);
+    if (len > 0) {
+        password[len] = 0;
         if (verbose)
             BIO_printf(bio_err,
                        "Validating\n   user=\"%s\"\n srp_verifier=\"%s\"\n srp_usersalt=\"%s\"\n g=\"%s\"\n N=\"%s\"\n",
                        user, srp_verifier, srp_usersalt, g, N);
-        BIO_printf(bio_err, "Pass %s\n", password);
+        if (verbose > 1)
+            BIO_printf(bio_err, "Pass %s\n", password);
 
         OPENSSL_assert(srp_usersalt != NULL);
-        if (!
-            (gNid =
-             SRP_create_verifier(user, password, &srp_usersalt, &verifier, N,
-                                 g))) {
+        if ((gNid = SRP_create_verifier(user, password, &srp_usersalt,
+                                        &verifier, N, g)) == NULL) {
             BIO_printf(bio_err, "Internal error validating SRP verifier\n");
         } else {
             if (strcmp(verifier, srp_verifier))
                 gNid = NULL;
             OPENSSL_free(verifier);
         }
+        OPENSSL_cleanse(password, len);
     }
     return gNid;
 }
@@ -153,57 +160,72 @@ static char *srp_create_user(char *user, char **srp_verifier,
                              char **srp_usersalt, char *g, char *N,
                              char *passout, int verbose)
 {
-    char password[1024];
+    char password[1025];
     PW_CB_DATA cb_tmp;
     char *gNid = NULL;
     char *salt = NULL;
+    int len;
     cb_tmp.prompt_info = user;
     cb_tmp.password = passout;
 
-    if (password_callback(password, sizeof(password), 1, &cb_tmp) > 0) {
+    len = password_callback(password, sizeof(password)-1, 1, &cb_tmp);
+    if (len > 0) {
+        password[len] = 0;
         if (verbose)
             BIO_printf(bio_err, "Creating\n user=\"%s\"\n g=\"%s\"\n N=\"%s\"\n",
                        user, g, N);
-        if (!
-            (gNid =
-             SRP_create_verifier(user, password, &salt, srp_verifier, N,
-                                 g))) {
+        if ((gNid = SRP_create_verifier(user, password, &salt,
+                                        srp_verifier, N, g)) == NULL) {
             BIO_printf(bio_err, "Internal error creating SRP verifier\n");
-        } else
+        } else {
             *srp_usersalt = salt;
+        }
+        OPENSSL_cleanse(password, len);
         if (verbose > 1)
-            BIO_printf(bio_err, "gNid=%s salt =\"%s\"\n verifier =\"%s\"\n", gNid,
-                       salt, *srp_verifier);
+            BIO_printf(bio_err, "gNid=%s salt =\"%s\"\n verifier =\"%s\"\n",
+                       gNid, salt, *srp_verifier);
 
     }
     return gNid;
 }
 
 typedef enum OPTION_choice {
-    OPT_ERR = -1, OPT_EOF = 0, OPT_HELP,
+    OPT_COMMON,
     OPT_VERBOSE, OPT_CONFIG, OPT_NAME, OPT_SRPVFILE, OPT_ADD,
     OPT_DELETE, OPT_MODIFY, OPT_LIST, OPT_GN, OPT_USERINFO,
-    OPT_PASSIN, OPT_PASSOUT, OPT_ENGINE
+    OPT_PASSIN, OPT_PASSOUT, OPT_ENGINE, OPT_R_ENUM, OPT_PROV_ENUM
 } OPTION_CHOICE;
 
 const OPTIONS srp_options[] = {
+    {OPT_HELP_STR, 1, '-', "Usage: %s [options] [user...]\n"},
+
+    OPT_SECTION("General"),
     {"help", OPT_HELP, '-', "Display this summary"},
     {"verbose", OPT_VERBOSE, '-', "Talk a lot while doing things"},
     {"config", OPT_CONFIG, '<', "A config file"},
     {"name", OPT_NAME, 's', "The particular srp definition to use"},
-    {"srpvfile", OPT_SRPVFILE, '<', "The srp verifier file name"},
-    {"add", OPT_ADD, '-', "Add a user and srp verifier"},
-    {"modify", OPT_MODIFY, '-',
-     "Modify the srp verifier of an existing user"},
+#ifndef OPENSSL_NO_ENGINE
+    {"engine", OPT_ENGINE, 's', "Use engine, possibly a hardware device"},
+#endif
+
+    OPT_SECTION("Action"),
+    {"add", OPT_ADD, '-', "Add a user and SRP verifier"},
+    {"modify", OPT_MODIFY, '-', "Modify the SRP verifier of an existing user"},
     {"delete", OPT_DELETE, '-', "Delete user from verifier file"},
     {"list", OPT_LIST, '-', "List users"},
+
+    OPT_SECTION("Configuration"),
+    {"srpvfile", OPT_SRPVFILE, '<', "The srp verifier file name"},
     {"gn", OPT_GN, 's', "Set g and N values to be used for new verifier"},
     {"userinfo", OPT_USERINFO, 's', "Additional info to be set for user"},
     {"passin", OPT_PASSIN, 's', "Input file pass phrase source"},
     {"passout", OPT_PASSOUT, 's', "Output file pass phrase source"},
-# ifndef OPENSSL_NO_ENGINE
-    {"engine", OPT_ENGINE, 's', "Use engine, possibly a hardware device"},
-# endif
+
+    OPT_R_OPTIONS,
+    OPT_PROV_OPTIONS,
+
+    OPT_PARAMETERS(),
+    {"user", 0, 0, "Username(s) to process (optional)"},
     {NULL}
 };
 
@@ -216,7 +238,7 @@ int srp_main(int argc, char **argv)
     int doupdatedb = 0, mode = OPT_ERR;
     char *user = NULL, *passinarg = NULL, *passoutarg = NULL;
     char *passin = NULL, *passout = NULL, *gN = NULL, *userinfo = NULL;
-    char *randfile = NULL, *section = NULL;
+    char *section = NULL;
     char **gNrow = NULL, *configfile = NULL;
     char *srpvfile = NULL, **pp, *prog;
     OPTION_CHOICE o;
@@ -251,7 +273,7 @@ int srp_main(int argc, char **argv)
         case OPT_LIST:
             if (mode != OPT_ERR) {
                 BIO_printf(bio_err,
-                           "%s: Only one of -add/delete-modify/-list\n",
+                           "%s: Only one of -add/-delete/-modify/-list\n",
                            prog);
                 goto opthelp;
             }
@@ -272,12 +294,25 @@ int srp_main(int argc, char **argv)
         case OPT_ENGINE:
             e = setup_engine(opt_arg(), 0);
             break;
+        case OPT_R_CASES:
+            if (!opt_rand(o))
+                goto end;
+            break;
+        case OPT_PROV_CASES:
+            if (!opt_provider(o))
+                goto end;
+            break;
         }
     }
+
+    /* Optional parameters are usernames. */
     argc = opt_num_rest();
     argv = opt_rest();
 
-    if (srpvfile && configfile) {
+    if (!app_RAND_load())
+        goto end;
+
+    if (srpvfile != NULL && configfile != NULL) {
         BIO_printf(bio_err,
                    "-srpvfile and -configfile cannot be specified together.\n");
         goto end;
@@ -287,13 +322,14 @@ int srp_main(int argc, char **argv)
                    "Exactly one of the options -add, -delete, -modify -list must be specified.\n");
         goto opthelp;
     }
-    if ((mode == OPT_DELETE || mode == OPT_MODIFY || mode == OPT_ADD)
-        && argc < 1) {
-        BIO_printf(bio_err,
-                   "Need at least one user for options -add, -delete, -modify. \n");
-        goto opthelp;
+    if (mode == OPT_DELETE || mode == OPT_MODIFY || mode == OPT_ADD) {
+        if (argc == 0) {
+            BIO_printf(bio_err, "Need at least one user.\n");
+            goto opthelp;
+        }
+        user = *argv++;
     }
-    if ((passin || passout) && argc != 1) {
+    if ((passinarg != NULL || passoutarg != NULL) && argc != 1) {
         BIO_printf(bio_err,
                    "-passin, -passout arguments only valid with one user.\n");
         goto opthelp;
@@ -304,14 +340,11 @@ int srp_main(int argc, char **argv)
         goto end;
     }
 
-    if (!srpvfile) {
-        if (!configfile)
+    if (srpvfile == NULL) {
+        if (configfile == NULL)
             configfile = default_config_file;
 
-        if (verbose)
-            BIO_printf(bio_err, "Using configuration from %s\n",
-                       configfile);
-        conf = app_load_config(configfile);
+        conf = app_load_config_verbose(configfile, verbose);
         if (conf == NULL)
             goto end;
         if (configfile != default_config_file && !app_load_modules(conf))
@@ -329,8 +362,7 @@ int srp_main(int argc, char **argv)
                 goto end;
         }
 
-        if (randfile == NULL)
-            randfile = NCONF_get_string(conf, BASE_SECTION, "RANDFILE");
+        app_RAND_load_conf(conf, BASE_SECTION);
 
         if (verbose)
             BIO_printf(bio_err,
@@ -341,18 +373,16 @@ int srp_main(int argc, char **argv)
         if (srpvfile == NULL)
             goto end;
     }
-    if (randfile == NULL)
-        ERR_clear_error();
-    else
-        app_RAND_load_file(randfile, 0);
 
     if (verbose)
         BIO_printf(bio_err, "Trying to read SRP verifier file \"%s\"\n",
                    srpvfile);
 
     db = load_index(srpvfile, NULL);
-    if (db == NULL)
+    if (db == NULL) {
+        BIO_printf(bio_err, "Problem with index file: %s (could not load/parse file)\n", srpvfile);
         goto end;
+    }
 
     /* Lets check some fields */
     for (i = 0; i < sk_OPENSSL_PSTRING_num(db->db->data); i++) {
@@ -385,25 +415,20 @@ int srp_main(int argc, char **argv)
     if (verbose > 1)
         BIO_printf(bio_err, "Starting user processing\n");
 
-    if (argc > 0)
-        user = *(argv++);
-
-    while (mode == OPT_LIST || user) {
+    while (mode == OPT_LIST || user != NULL) {
         int userindex = -1;
 
         if (user != NULL && verbose > 1)
             BIO_printf(bio_err, "Processing user \"%s\"\n", user);
-        if ((userindex = get_index(db, user, 'U')) >= 0) {
+        if ((userindex = get_index(db, user, 'U')) >= 0)
             print_user(db, userindex, (verbose > 0) || mode == OPT_LIST);
-        }
 
         if (mode == OPT_LIST) {
             if (user == NULL) {
                 BIO_printf(bio_err, "List all users\n");
 
-                for (i = 0; i < sk_OPENSSL_PSTRING_num(db->db->data); i++) {
+                for (i = 0; i < sk_OPENSSL_PSTRING_num(db->db->data); i++)
                     print_user(db, i, 1);
-                }
             } else if (userindex < 0) {
                 BIO_printf(bio_err,
                            "user \"%s\" does not exist, ignored. t\n", user);
@@ -551,10 +576,10 @@ int srp_main(int argc, char **argv)
                 doupdatedb = 1;
             }
         }
-        if (--argc > 0)
-            user = *(argv++);
-        else {
-            user = NULL;
+        user = *argv++;
+        if (user == NULL) {
+            /* no more processing in any mode if no users left */
+            break;
         }
     }
 
@@ -599,11 +624,8 @@ int srp_main(int argc, char **argv)
     OPENSSL_free(passout);
     if (ret)
         ERR_print_errors(bio_err);
-    if (randfile)
-        app_RAND_write_file(randfile);
     NCONF_free(conf);
     free_index(db);
     release_engine(e);
-    return (ret);
+    return ret;
 }
-#endif

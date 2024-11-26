@@ -1,90 +1,18 @@
 /*
- * Copyright 1998-2016 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 1998-2023 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright (c) 2002, Oracle and/or its affiliates. All rights reserved
  *
- * Licensed under the OpenSSL license (the "License").  You may not use
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
  * in the file LICENSE in the source distribution or at
  * https://www.openssl.org/source/license.html
  */
 
-/* ====================================================================
- * Copyright 2002 Sun Microsystems, Inc. ALL RIGHTS RESERVED.
- * ECDH support in OpenSSL originally developed by
- * SUN MICROSYSTEMS, INC., and contributed to the OpenSSL project.
- */
-
-#include "internal/cryptlib_int.h"
+#include "internal/e_os.h"
+#include "crypto/cryptlib.h"
 #include <openssl/safestack.h>
 
-#if     defined(__i386)   || defined(__i386__)   || defined(_M_IX86) || \
-        defined(__x86_64) || defined(__x86_64__) || \
-        defined(_M_AMD64) || defined(_M_X64)
-
-extern unsigned int OPENSSL_ia32cap_P[4];
-
-# if defined(OPENSSL_CPUID_OBJ) && !defined(OPENSSL_NO_ASM) && !defined(I386_ONLY)
-#include <stdio.h>
-#  define OPENSSL_CPUID_SETUP
-typedef uint64_t IA32CAP;
-void OPENSSL_cpuid_setup(void)
-{
-    static int trigger = 0;
-    IA32CAP OPENSSL_ia32_cpuid(unsigned int *);
-    IA32CAP vec;
-    char *env;
-
-    if (trigger)
-        return;
-
-    trigger = 1;
-    if ((env = getenv("OPENSSL_ia32cap"))) {
-        int off = (env[0] == '~') ? 1 : 0;
-#  if defined(_WIN32)
-        if (!sscanf(env + off, "%I64i", &vec))
-            vec = strtoul(env + off, NULL, 0);
-#  else
-        if (!sscanf(env + off, "%lli", (long long *)&vec))
-            vec = strtoul(env + off, NULL, 0);
-#  endif
-        if (off)
-            vec = OPENSSL_ia32_cpuid(OPENSSL_ia32cap_P) & ~vec;
-        else if (env[0] == ':')
-            vec = OPENSSL_ia32_cpuid(OPENSSL_ia32cap_P);
-
-        OPENSSL_ia32cap_P[2] = 0;
-        if ((env = strchr(env, ':'))) {
-            unsigned int vecx;
-            env++;
-            off = (env[0] == '~') ? 1 : 0;
-            vecx = strtoul(env + off, NULL, 0);
-            if (off)
-                OPENSSL_ia32cap_P[2] &= ~vecx;
-            else
-                OPENSSL_ia32cap_P[2] = vecx;
-        }
-    } else
-        vec = OPENSSL_ia32_cpuid(OPENSSL_ia32cap_P);
-
-    /*
-     * |(1<<10) sets a reserved bit to signal that variable
-     * was initialized already... This is to avoid interference
-     * with cpuid snippets in ELF .init segment.
-     */
-    OPENSSL_ia32cap_P[0] = (unsigned int)vec | (1 << 10);
-    OPENSSL_ia32cap_P[1] = (unsigned int)(vec >> 32);
-}
-# else
-unsigned int OPENSSL_ia32cap_P[4];
-# endif
-#endif
-int OPENSSL_NONPIC_relocated = 0;
-#if !defined(OPENSSL_CPUID_SETUP) && !defined(OPENSSL_CPUID_OBJ)
-void OPENSSL_cpuid_setup(void)
-{
-}
-#endif
-
-#if defined(_WIN32) && !defined(__CYGWIN__)
+#if defined(_WIN32) && !defined(OPENSSL_SYS_UEFI)
 # include <tchar.h>
 # include <signal.h>
 # ifdef __WATCOMC__
@@ -99,6 +27,14 @@ void OPENSSL_cpuid_setup(void)
 # endif
 
 # if defined(_WIN32_WINNT) && _WIN32_WINNT>=0x0333
+#  ifdef OPENSSL_SYS_WIN_CORE
+
+int OPENSSL_isservice(void)
+{
+    /* OneCore API cannot interact with GUI */
+    return 1;
+}
+#  else
 int OPENSSL_isservice(void)
 {
     HWINSTA h;
@@ -113,10 +49,14 @@ int OPENSSL_isservice(void)
 
     if (_OPENSSL_isservice.p == NULL) {
         HANDLE mod = GetModuleHandle(NULL);
+        FARPROC f = NULL;
+
         if (mod != NULL)
-            _OPENSSL_isservice.f = GetProcAddress(mod, "_OPENSSL_isservice");
-        if (_OPENSSL_isservice.p == NULL)
+            f = GetProcAddress(mod, "_OPENSSL_isservice");
+        if (f == NULL)
             _OPENSSL_isservice.p = (void *)-1;
+        else
+            _OPENSSL_isservice.f = f;
     }
 
     if (_OPENSSL_isservice.p != (void *)-1)
@@ -139,7 +79,7 @@ int OPENSSL_isservice(void)
 
     len++, len &= ~1;           /* paranoia */
     name[len / sizeof(WCHAR)] = L'\0'; /* paranoia */
-#  if 1
+#   if 1
     /*
      * This doesn't cover "interactive" services [working with real
      * WinSta0's] nor programs started non-interactively by Task Scheduler
@@ -147,14 +87,15 @@ int OPENSSL_isservice(void)
      */
     if (wcsstr(name, L"Service-0x"))
         return 1;
-#  else
+#   else
     /* This covers all non-interactive programs such as services. */
     if (!wcsstr(name, L"WinSta0"))
         return 1;
-#  endif
+#   endif
     else
         return 0;
 }
+#  endif
 # else
 int OPENSSL_isservice(void)
 {
@@ -167,7 +108,13 @@ void OPENSSL_showfatal(const char *fmta, ...)
     va_list ap;
     TCHAR buf[256];
     const TCHAR *fmt;
-# ifdef STD_ERROR_HANDLE        /* what a dirty trick! */
+    /*
+     * First check if it's a console application, in which case the
+     * error message would be printed to standard error.
+     * Windows CE does not have a concept of a console application,
+     * so we need to guard the check.
+     */
+# ifdef STD_ERROR_HANDLE
     HANDLE h;
 
     if ((h = GetStdHandle(STD_ERROR_HANDLE)) != NULL &&
@@ -245,6 +192,18 @@ void OPENSSL_showfatal(const char *fmta, ...)
     va_end(ap);
 
 # if defined(_WIN32_WINNT) && _WIN32_WINNT>=0x0333
+#  ifdef OPENSSL_SYS_WIN_CORE
+    /* ONECORE is always NONGUI and NT >= 0x0601 */
+#   if !defined(NDEBUG)
+        /*
+        * We are in a situation where we tried to report a critical
+        * error and this failed for some reason. As a last resort,
+        * in debug builds, send output to the debugger or any other
+        * tool like DebugView which can monitor the output.
+        */
+        OutputDebugString(buf);
+#   endif
+#  else
     /* this -------------v--- guards NT-specific calls */
     if (check_winnt() && OPENSSL_isservice() > 0) {
         HANDLE hEventLog = RegisterEventSource(NULL, _T("OpenSSL"));
@@ -254,7 +213,7 @@ void OPENSSL_showfatal(const char *fmta, ...)
 
             if (!ReportEvent(hEventLog, EVENTLOG_ERROR_TYPE, 0, 0, NULL,
                              1, 0, &pmsg, NULL)) {
-#if defined(DEBUG)
+#   if !defined(NDEBUG)
                 /*
                  * We are in a situation where we tried to report a critical
                  * error and this failed for some reason. As a last resort,
@@ -262,14 +221,18 @@ void OPENSSL_showfatal(const char *fmta, ...)
                  * tool like DebugView which can monitor the output.
                  */
                 OutputDebugString(pmsg);
-#endif
+#   endif
             }
 
             (void)DeregisterEventSource(hEventLog);
         }
-    } else
-# endif
+    } else {
         MessageBox(NULL, buf, _T("OpenSSL: FATAL"), MB_OK | MB_ICONERROR);
+    }
+#  endif
+# else
+    MessageBox(NULL, buf, _T("OpenSSL: FATAL"), MB_OK | MB_ICONERROR);
+# endif
 }
 #else
 void OPENSSL_showfatal(const char *fmta, ...)
@@ -293,7 +256,7 @@ void OPENSSL_die(const char *message, const char *file, int line)
 {
     OPENSSL_showfatal("%s:%d: OpenSSL internal error: %s\n",
                       file, line, message);
-#if !defined(_WIN32) || defined(__CYGWIN__)
+#if !defined(_WIN32) || defined(OPENSSL_SYS_UEFI)
     abort();
 #else
     /*
@@ -306,36 +269,14 @@ void OPENSSL_die(const char *message, const char *file, int line)
 #endif
 }
 
-#if !defined(OPENSSL_CPUID_OBJ)
-/* volatile unsigned char* pointers are there because
- * 1. Accessing a variable declared volatile via a pointer
- *    that lacks a volatile qualifier causes undefined behavior.
- * 2. When the variable itself is not volatile the compiler is
- *    not required to keep all those reads and can convert
- *    this into canonical memcmp() which doesn't read the whole block.
- * Pointers to volatile resolve the first problem fully. The second
- * problem cannot be resolved in any Standard-compliant way but this
- * works the problem around. Compilers typically react to
- * pointers to volatile by preserving the reads and writes through them.
- * The latter is not required by the Standard if the memory pointed to
- * is not volatile.
- * Pointers themselves are volatile in the function signature to work
- * around a subtle bug in gcc 4.6+ which causes writes through
- * pointers to volatile to not be emitted in some rare,
- * never needed in real life, pieces of code.
+#if defined(__TANDEM) && defined(OPENSSL_VPROC)
+/*
+ * Define a VPROC function for HP NonStop build crypto library.
+ * This is used by platform version identification tools.
+ * Do not inline this procedure or make it static.
  */
-int CRYPTO_memcmp(const volatile void * volatile in_a,
-                  const volatile void * volatile in_b,
-                  size_t len)
-{
-    size_t i;
-    const volatile unsigned char *a = in_a;
-    const volatile unsigned char *b = in_b;
-    unsigned char x = 0;
-
-    for (i = 0; i < len; i++)
-        x |= a[i] ^ b[i];
-
-    return x;
-}
-#endif
+# define OPENSSL_VPROC_STRING_(x)    x##_CRYPTO
+# define OPENSSL_VPROC_STRING(x)     OPENSSL_VPROC_STRING_(x)
+# define OPENSSL_VPROC_FUNC          OPENSSL_VPROC_STRING(OPENSSL_VPROC)
+void OPENSSL_VPROC_FUNC(void) {}
+#endif /* __TANDEM */

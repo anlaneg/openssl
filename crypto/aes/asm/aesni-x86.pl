@@ -1,7 +1,7 @@
 #! /usr/bin/env perl
-# Copyright 2009-2016 The OpenSSL Project Authors. All Rights Reserved.
+# Copyright 2009-2020 The OpenSSL Project Authors. All Rights Reserved.
 #
-# Licensed under the OpenSSL license (the "License").  You may not use
+# Licensed under the Apache License 2.0 (the "License").  You may not use
 # this file except in compliance with the License.  You can obtain a copy
 # in the file LICENSE in the source distribution or at
 # https://www.openssl.org/source/license.html
@@ -76,11 +76,9 @@ $0 =~ m/(.*[\/\\])[^\/\\]+$/; $dir=$1;
 push(@INC,"${dir}","${dir}../../perlasm");
 require "x86asm.pl";
 
-$output = pop;
-open OUT,">$output";
-*STDOUT=*OUT;
+$output = pop and open STDOUT,">$output";
 
-&asm_init($ARGV[0],$0);
+&asm_init($ARGV[0]);
 
 &external_label("OPENSSL_ia32cap_P");
 &static_label("key_const");
@@ -239,7 +237,7 @@ sub aesni_generate1	# fully unrolled loop
 # can schedule aes[enc|dec] every cycle optimal interleave factor
 # equals to corresponding instructions latency. 8x is optimal for
 # * Bridge, but it's unfeasible to accommodate such implementation
-# in XMM registers addreassable in 32-bit mode and therefore maximum
+# in XMM registers addressable in 32-bit mode and therefore maximum
 # of 6x is used instead...
 
 sub aesni_generate2
@@ -2027,7 +2025,7 @@ my ($l_,$block,$i1,$i3,$i5) = ($rounds_,$key_,$rounds,$len,$out);
 	&movdqu		(&QWP(-16*2,$out,$inp),$inout4);
 	&movdqu		(&QWP(-16*1,$out,$inp),$inout5);
 	&cmp		($inp,$len);			# done yet?
-	&jb		(&label("grandloop"));
+	&jbe		(&label("grandloop"));
 
 &set_label("short");
 	&add		($len,16*6);
@@ -2453,7 +2451,7 @@ my ($l_,$block,$i1,$i3,$i5) = ($rounds_,$key_,$rounds,$len,$out);
 	&pxor		($rndkey1,$inout5);
 	&movdqu		(&QWP(-16*1,$out,$inp),$inout5);
 	&cmp		($inp,$len);			# done yet?
-	&jb		(&label("grandloop"));
+	&jbe		(&label("grandloop"));
 
 &set_label("short");
 	&add		($len,16*6);
@@ -3412,4 +3410,4 @@ my ($l_,$block,$i1,$i3,$i5) = ($rounds_,$key_,$rounds,$len,$out);
 
 &asm_finish();
 
-close STDOUT;
+close STDOUT or die "error closing STDOUT: $!";

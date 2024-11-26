@@ -1,13 +1,14 @@
 /*
- * Copyright 2016 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2016-2022 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Licensed under the OpenSSL licenses, (the "License");
+ * Licensed under the Apache License 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  * https://www.openssl.org/source/license.html
  * or in the file LICENSE in the source distribution.
  */
 
+#include <time.h>
 #include <openssl/rand.h>
 #include <openssl/ssl.h>
 #include <openssl/rsa.h>
@@ -17,49 +18,44 @@
 #include <openssl/err.h>
 #include "fuzzer.h"
 
-#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
-extern int rand_predictable;
-#endif
-#define ENTROPY_NEEDED 32
-
 /* unused, to avoid warning. */
 static int idx;
+
+#define FUZZTIME 1485898104
+
+#define TIME_IMPL(t) { if (t != NULL) *t = FUZZTIME; return FUZZTIME; }
+
+/*
+ * This might not work in all cases (and definitely not on Windows
+ * because of the way linkers are) and callees can still get the
+ * current time instead of the fixed time. This will just result
+ * in things not being fully reproducible and have a slightly
+ * different coverage.
+ */
+#if !defined(_WIN32)
+time_t time(time_t *t) TIME_IMPL(t)
+#endif
 
 int FuzzerInitialize(int *argc, char ***argv)
 {
     STACK_OF(SSL_COMP) *comp_methods;
 
+    FuzzerSetRand();
     OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CRYPTO_STRINGS | OPENSSL_INIT_ASYNC, NULL);
     OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS, NULL);
-    ERR_get_state();
+    ERR_clear_error();
     CRYPTO_free_ex_index(0, -1);
     idx = SSL_get_ex_data_X509_STORE_CTX_idx();
-    RAND_add("", 1, ENTROPY_NEEDED);
-    RAND_status();
-    RSA_get_default_method();
-#ifndef OPENSSL_NO_DSA
-    DSA_get_default_method();
-#endif
-#ifndef OPENSSL_NO_EC
-    EC_KEY_get_default_method();
-#endif
-#ifndef OPENSSL_NO_DH
-    DH_get_default_method();
-#endif
     comp_methods = SSL_COMP_get_compression_methods();
-    OPENSSL_sk_sort((OPENSSL_STACK *)comp_methods);
-
-
-#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
-    rand_predictable = 1;
-#endif
+    if (comp_methods != NULL)
+        sk_SSL_COMP_sort(comp_methods);
 
     return 1;
 }
 
 int FuzzerTestOneInput(const uint8_t *buf, size_t len)
 {
-    SSL *client;
+    SSL *client = NULL;
     BIO *in;
     BIO *out;
     SSL_CTX *ctx;
@@ -67,18 +63,25 @@ int FuzzerTestOneInput(const uint8_t *buf, size_t len)
     if (len == 0)
         return 0;
 
-    /*
-     * TODO: use the ossltest engine (optionally?) to disable crypto checks.
-     */
-
     /* This only fuzzes the initial flow from the client so far. */
     ctx = SSL_CTX_new(SSLv23_method());
+    if (ctx == NULL)
+        goto end;
 
     client = SSL_new(ctx);
+    if (client == NULL)
+        goto end;
+    OPENSSL_assert(SSL_set_min_proto_version(client, 0) == 1);
     OPENSSL_assert(SSL_set_cipher_list(client, "ALL:eNULL:@SECLEVEL=0") == 1);
     SSL_set_tlsext_host_name(client, "localhost");
     in = BIO_new(BIO_s_mem());
+    if (in == NULL)
+        goto end;
     out = BIO_new(BIO_s_mem());
+    if (out == NULL) {
+        BIO_free(in);
+        goto end;
+    }
     SSL_set_bio(client, in, out);
     SSL_set_connect_state(client);
     OPENSSL_assert((size_t)BIO_write(in, buf, len) == len);
@@ -91,6 +94,7 @@ int FuzzerTestOneInput(const uint8_t *buf, size_t len)
             }
         }
     }
+ end:
     SSL_free(client);
     ERR_clear_error();
     SSL_CTX_free(ctx);
@@ -100,4 +104,5 @@ int FuzzerTestOneInput(const uint8_t *buf, size_t len)
 
 void FuzzerCleanup(void)
 {
+    FuzzerClearRand();
 }

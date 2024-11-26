@@ -1,7 +1,7 @@
 #! /usr/bin/env perl
-# Copyright 2012-2016 The OpenSSL Project Authors. All Rights Reserved.
+# Copyright 2012-2023 The OpenSSL Project Authors. All Rights Reserved.
 #
-# Licensed under the OpenSSL license (the "License").  You may not use
+# Licensed under the Apache License 2.0 (the "License").  You may not use
 # this file except in compliance with the License.  You can obtain a copy
 # in the file LICENSE in the source distribution or at
 # https://www.openssl.org/source/license.html
@@ -14,8 +14,7 @@
 # details see http://www.openssl.org/~appro/cryptogams/.
 #
 # Specific modes and adaptation for Linux kernel by Ard Biesheuvel
-# <ard.biesheuvel@linaro.org>. Permission to use under GPL terms is
-# granted.
+# of Linaro.
 # ====================================================================
 
 # Bit-sliced AES for ARM NEON
@@ -49,14 +48,12 @@
 #						<appro@openssl.org>
 
 # April-August 2013
-#
-# Add CBC, CTR and XTS subroutines, adapt for kernel use.
-#
-#					<ard.biesheuvel@linaro.org>
+# Add CBC, CTR and XTS subroutines and adapt for kernel use; courtesy of Ard.
 
-$flavour = shift;
-if ($flavour=~/\w[\w\-]*\.\w+$/) { $output=$flavour; undef $flavour; }
-else { while (($output=shift) && ($output!~/\w[\w\-]*\.\w+$/)) {} }
+# $output is the last argument if it looks like a file (it has an extension)
+# $flavour is the first argument if it doesn't look like a file
+$output = $#ARGV >= 0 && $ARGV[$#ARGV] =~ m|\.\w+$| ? pop : undef;
+$flavour = $#ARGV >= 0 && $ARGV[0] !~ m|\.| ? shift : undef;
 
 if ($flavour && $flavour ne "void") {
     $0 =~ m/(.*[\/\\])[^\/\\]+$/; $dir=$1;
@@ -64,9 +61,10 @@ if ($flavour && $flavour ne "void") {
     ( $xlate="${dir}../../perlasm/arm-xlate.pl" and -f $xlate) or
     die "can't locate arm-xlate.pl";
 
-    open STDOUT,"| \"$^X\" $xlate $flavour $output";
+    open STDOUT,"| \"$^X\" $xlate $flavour \"$output\""
+        or die "can't call $xlate: $!";
 } else {
-    open STDOUT,">$output";
+    $output and open STDOUT,">$output";
 }
 
 my ($inp,$out,$len,$key)=("r0","r1","r2","r3");
@@ -732,7 +730,6 @@ $code.=<<___;
 .arch	armv7-a
 .fpu	neon
 
-.text
 .syntax	unified 	@ ARMv7-capable assembler is expected to handle this
 #if defined(__thumb2__) && !defined(__APPLE__)
 .thumb
@@ -741,12 +738,14 @@ $code.=<<___;
 # undef __thumb2__
 #endif
 
+.text
+
 .type	_bsaes_decrypt8,%function
 .align	4
 _bsaes_decrypt8:
-	adr	$const,_bsaes_decrypt8
+	adr	$const,.
 	vldmia	$key!, {@XMM[9]}		@ round 0 key
-#ifdef	__APPLE__
+#if defined(__thumb2__) || defined(__APPLE__)
 	adr	$const,.LM0ISR
 #else
 	add	$const,$const,#.LM0ISR-_bsaes_decrypt8
@@ -843,9 +842,9 @@ _bsaes_const:
 .type	_bsaes_encrypt8,%function
 .align	4
 _bsaes_encrypt8:
-	adr	$const,_bsaes_encrypt8
+	adr	$const,.
 	vldmia	$key!, {@XMM[9]}		@ round 0 key
-#ifdef	__APPLE__
+#if defined(__thumb2__) || defined(__APPLE__)
 	adr	$const,.LM0SR
 #else
 	sub	$const,$const,#_bsaes_encrypt8-.LM0SR
@@ -951,9 +950,9 @@ $code.=<<___;
 .type	_bsaes_key_convert,%function
 .align	4
 _bsaes_key_convert:
-	adr	$const,_bsaes_key_convert
+	adr	$const,.
 	vld1.8	{@XMM[7]},  [$inp]!		@ load round 0 key
-#ifdef	__APPLE__
+#if defined(__thumb2__) || defined(__APPLE__)
 	adr	$const,.LM0
 #else
 	sub	$const,$const,#_bsaes_key_convert-.LM0
@@ -1120,18 +1119,18 @@ $code.=<<___;
 .extern AES_cbc_encrypt
 .extern AES_decrypt
 
-.global	bsaes_cbc_encrypt
-.type	bsaes_cbc_encrypt,%function
+.global	ossl_bsaes_cbc_encrypt
+.type	ossl_bsaes_cbc_encrypt,%function
 .align	5
-bsaes_cbc_encrypt:
+ossl_bsaes_cbc_encrypt:
 #ifndef	__KERNEL__
 	cmp	$len, #128
 #ifndef	__thumb__
 	blo	AES_cbc_encrypt
 #else
-	bhs	1f
+	bhs	.Lcbc_do_bsaes
 	b	AES_cbc_encrypt
-1:
+.Lcbc_do_bsaes:
 #endif
 #endif
 
@@ -1365,7 +1364,7 @@ bsaes_cbc_encrypt:
 	vmov	@XMM[4],@XMM[15]		@ just in case ensure that IV
 	vmov	@XMM[5],@XMM[0]			@ and input are preserved
 	bl	AES_decrypt
-	vld1.8	{@XMM[0]}, [$fp,:64]		@ load result
+	vld1.8	{@XMM[0]}, [$fp]		@ load result
 	veor	@XMM[0], @XMM[0], @XMM[4]	@ ^= IV
 	vmov	@XMM[15], @XMM[5]		@ @XMM[5] holds input
 	vst1.8	{@XMM[0]}, [$rounds]		@ write output
@@ -1385,7 +1384,7 @@ bsaes_cbc_encrypt:
 	vst1.8	{@XMM[15]}, [$ivp]		@ return IV
 	VFP_ABI_POP
 	ldmia	sp!, {r4-r10, pc}
-.size	bsaes_cbc_encrypt,.-bsaes_cbc_encrypt
+.size	ossl_bsaes_cbc_encrypt,.-ossl_bsaes_cbc_encrypt
 ___
 }
 {
@@ -1395,10 +1394,10 @@ my $keysched = "sp";
 
 $code.=<<___;
 .extern	AES_encrypt
-.global	bsaes_ctr32_encrypt_blocks
-.type	bsaes_ctr32_encrypt_blocks,%function
+.global	ossl_bsaes_ctr32_encrypt_blocks
+.type	ossl_bsaes_ctr32_encrypt_blocks,%function
 .align	5
-bsaes_ctr32_encrypt_blocks:
+ossl_bsaes_ctr32_encrypt_blocks:
 	cmp	$len, #8			@ use plain AES for
 	blo	.Lctr_enc_short			@ small sizes
 
@@ -1448,7 +1447,7 @@ bsaes_ctr32_encrypt_blocks:
 .align	2
 0:	add	r12, $key, #248
 	vld1.8	{@XMM[0]}, [$ctr]		@ load counter
-	adrl	$ctr, .LREVM0SR			@ borrow $ctr
+	add	$ctr, $const, #.LREVM0SR-.LM0	@ borrow $ctr
 	vldmia	r12, {@XMM[4]}			@ load round0 key
 	sub	sp, #0x10			@ place for adjusted round0 key
 #endif
@@ -1621,7 +1620,7 @@ bsaes_ctr32_encrypt_blocks:
 	vstmia		sp!, {q0-q1}
 
 	ldmia	sp!, {r4-r8, pc}
-.size	bsaes_ctr32_encrypt_blocks,.-bsaes_ctr32_encrypt_blocks
+.size	ossl_bsaes_ctr32_encrypt_blocks,.-ossl_bsaes_ctr32_encrypt_blocks
 ___
 }
 {
@@ -1636,10 +1635,10 @@ my $twmask=@XMM[5];
 my @T=@XMM[6..7];
 
 $code.=<<___;
-.globl	bsaes_xts_encrypt
-.type	bsaes_xts_encrypt,%function
+.globl	ossl_bsaes_xts_encrypt
+.type	ossl_bsaes_xts_encrypt,%function
 .align	4
-bsaes_xts_encrypt:
+ossl_bsaes_xts_encrypt:
 	mov	ip, sp
 	stmdb	sp!, {r4-r10, lr}		@ 0x20
 	VFP_ABI_PUSH
@@ -2038,12 +2037,12 @@ $code.=<<___;
 	VFP_ABI_POP
 	ldmia		sp!, {r4-r10, pc}	@ return
 
-.size	bsaes_xts_encrypt,.-bsaes_xts_encrypt
+.size	ossl_bsaes_xts_encrypt,.-ossl_bsaes_xts_encrypt
 
-.globl	bsaes_xts_decrypt
-.type	bsaes_xts_decrypt,%function
+.globl	ossl_bsaes_xts_decrypt
+.type	ossl_bsaes_xts_decrypt,%function
 .align	4
-bsaes_xts_decrypt:
+ossl_bsaes_xts_decrypt:
 	mov	ip, sp
 	stmdb	sp!, {r4-r10, lr}		@ 0x20
 	VFP_ABI_PUSH
@@ -2473,7 +2472,7 @@ $code.=<<___;
 	VFP_ABI_POP
 	ldmia		sp!, {r4-r10, pc}	@ return
 
-.size	bsaes_xts_decrypt,.-bsaes_xts_decrypt
+.size	ossl_bsaes_xts_decrypt,.-ossl_bsaes_xts_decrypt
 ___
 }
 $code.=<<___;
@@ -2492,4 +2491,4 @@ close SELF;
 
 print $code;
 
-close STDOUT;
+close STDOUT or die "error closing STDOUT: $!";

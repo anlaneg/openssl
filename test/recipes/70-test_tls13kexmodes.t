@@ -1,7 +1,7 @@
 #! /usr/bin/env perl
-# Copyright 2017 The OpenSSL Project Authors. All Rights Reserved.
+# Copyright 2017-2024 The OpenSSL Project Authors. All Rights Reserved.
 #
-# Licensed under the OpenSSL license (the "License").  You may not use
+# Licensed under the Apache License 2.0 (the "License").  You may not use
 # this file except in compliance with the License.  You can obtain a copy
 # in the file LICENSE in the source distribution or at
 # https://www.openssl.org/source/license.html
@@ -17,7 +17,7 @@ my $test_name = "test_tls13kexmodes";
 setup($test_name);
 
 plan skip_all => "TLSProxy isn't usable on $^O"
-    if $^O =~ /^(VMS|MSWin32)$/;
+    if $^O =~ /^(VMS)$/;
 
 plan skip_all => "$test_name needs the dynamic engine feature enabled"
     if disabled("engine") || disabled("dynamic-engine");
@@ -26,15 +26,18 @@ plan skip_all => "$test_name needs the sock feature enabled"
     if disabled("sock");
 
 plan skip_all => "$test_name needs TLSv1.3 enabled"
-    if disabled("tls1_3");
+    if disabled("tls1_3") || (disabled("ec") && disabled("dh"));
 
-$ENV{OPENSSL_ia32cap} = '~0x200000200000000';
-$ENV{CTLOG_FILE} = srctop_file("test", "ct", "log_list.conf");
-
+plan skip_all => "$test_name needs EC enabled"
+    if disabled("ec");
 
 @handmessages = (
     [TLSProxy::Message::MT_CLIENT_HELLO,
         checkhandshake::ALL_HANDSHAKES],
+    [TLSProxy::Message::MT_SERVER_HELLO,
+        checkhandshake::HRR_HANDSHAKE | checkhandshake::HRR_RESUME_HANDSHAKE],
+    [TLSProxy::Message::MT_CLIENT_HELLO,
+        checkhandshake::HRR_HANDSHAKE | checkhandshake::HRR_RESUME_HANDSHAKE],
     [TLSProxy::Message::MT_SERVER_HELLO,
         checkhandshake::ALL_HANDSHAKES],
     [TLSProxy::Message::MT_ENCRYPTED_EXTENSIONS,
@@ -42,9 +45,9 @@ $ENV{CTLOG_FILE} = srctop_file("test", "ct", "log_list.conf");
     [TLSProxy::Message::MT_CERTIFICATE_REQUEST,
         checkhandshake::CLIENT_AUTH_HANDSHAKE],
     [TLSProxy::Message::MT_CERTIFICATE,
-        checkhandshake::ALL_HANDSHAKES & ~checkhandshake::RESUME_HANDSHAKE],
+        checkhandshake::ALL_HANDSHAKES & ~(checkhandshake::RESUME_HANDSHAKE | checkhandshake::HRR_RESUME_HANDSHAKE)],
     [TLSProxy::Message::MT_CERTIFICATE_VERIFY,
-        checkhandshake::ALL_HANDSHAKES & ~checkhandshake::RESUME_HANDSHAKE],
+        checkhandshake::ALL_HANDSHAKES & ~(checkhandshake::RESUME_HANDSHAKE | checkhandshake::HRR_RESUME_HANDSHAKE)],
     [TLSProxy::Message::MT_FINISHED,
         checkhandshake::ALL_HANDSHAKES],
     [TLSProxy::Message::MT_CERTIFICATE,
@@ -58,42 +61,118 @@ $ENV{CTLOG_FILE} = srctop_file("test", "ct", "log_list.conf");
 
 @extensions = (
     [TLSProxy::Message::MT_CLIENT_HELLO, TLSProxy::Message::EXT_SERVER_NAME,
+        TLSProxy::Message::CLIENT,
         checkhandshake::SERVER_NAME_CLI_EXTENSION],
     [TLSProxy::Message::MT_CLIENT_HELLO, TLSProxy::Message::EXT_STATUS_REQUEST,
+        TLSProxy::Message::CLIENT,
         checkhandshake::STATUS_REQUEST_CLI_EXTENSION],
     [TLSProxy::Message::MT_CLIENT_HELLO, TLSProxy::Message::EXT_SUPPORTED_GROUPS,
+        TLSProxy::Message::CLIENT,
         checkhandshake::DEFAULT_EXTENSIONS],
     [TLSProxy::Message::MT_CLIENT_HELLO, TLSProxy::Message::EXT_EC_POINT_FORMATS,
+        TLSProxy::Message::CLIENT,
         checkhandshake::DEFAULT_EXTENSIONS],
     [TLSProxy::Message::MT_CLIENT_HELLO, TLSProxy::Message::EXT_SIG_ALGS,
+        TLSProxy::Message::CLIENT,
         checkhandshake::DEFAULT_EXTENSIONS],
     [TLSProxy::Message::MT_CLIENT_HELLO, TLSProxy::Message::EXT_ALPN,
+        TLSProxy::Message::CLIENT,
         checkhandshake::ALPN_CLI_EXTENSION],
     [TLSProxy::Message::MT_CLIENT_HELLO, TLSProxy::Message::EXT_SCT,
+        TLSProxy::Message::CLIENT,
         checkhandshake::SCT_CLI_EXTENSION],
     [TLSProxy::Message::MT_CLIENT_HELLO, TLSProxy::Message::EXT_ENCRYPT_THEN_MAC,
+        TLSProxy::Message::CLIENT,
         checkhandshake::DEFAULT_EXTENSIONS],
     [TLSProxy::Message::MT_CLIENT_HELLO, TLSProxy::Message::EXT_EXTENDED_MASTER_SECRET,
+        TLSProxy::Message::CLIENT,
         checkhandshake::DEFAULT_EXTENSIONS],
     [TLSProxy::Message::MT_CLIENT_HELLO, TLSProxy::Message::EXT_SESSION_TICKET,
+        TLSProxy::Message::CLIENT,
         checkhandshake::DEFAULT_EXTENSIONS],
     [TLSProxy::Message::MT_CLIENT_HELLO, TLSProxy::Message::EXT_KEY_SHARE,
+        TLSProxy::Message::CLIENT,
         checkhandshake::DEFAULT_EXTENSIONS],
     [TLSProxy::Message::MT_CLIENT_HELLO, TLSProxy::Message::EXT_SUPPORTED_VERSIONS,
+        TLSProxy::Message::CLIENT,
         checkhandshake::DEFAULT_EXTENSIONS],
     [TLSProxy::Message::MT_CLIENT_HELLO, TLSProxy::Message::EXT_PSK_KEX_MODES,
+        TLSProxy::Message::CLIENT,
         checkhandshake::PSK_KEX_MODES_EXTENSION],
     [TLSProxy::Message::MT_CLIENT_HELLO, TLSProxy::Message::EXT_PSK,
+        TLSProxy::Message::CLIENT,
         checkhandshake::PSK_CLI_EXTENSION],
+    [TLSProxy::Message::MT_CLIENT_HELLO, TLSProxy::Message::EXT_RENEGOTIATE,
+        TLSProxy::Message::CLIENT,
+        checkhandshake::DEFAULT_EXTENSIONS],
 
+    [TLSProxy::Message::MT_SERVER_HELLO, TLSProxy::Message::EXT_SUPPORTED_VERSIONS,
+        TLSProxy::Message::SERVER,
+        checkhandshake::DEFAULT_EXTENSIONS],
     [TLSProxy::Message::MT_SERVER_HELLO, TLSProxy::Message::EXT_KEY_SHARE,
+        TLSProxy::Message::SERVER,
+        checkhandshake::KEY_SHARE_HRR_EXTENSION],
+
+    [TLSProxy::Message::MT_CLIENT_HELLO, TLSProxy::Message::EXT_SERVER_NAME,
+        TLSProxy::Message::CLIENT,
+        checkhandshake::SERVER_NAME_CLI_EXTENSION],
+    [TLSProxy::Message::MT_CLIENT_HELLO, TLSProxy::Message::EXT_STATUS_REQUEST,
+        TLSProxy::Message::CLIENT,
+        checkhandshake::STATUS_REQUEST_CLI_EXTENSION],
+    [TLSProxy::Message::MT_CLIENT_HELLO, TLSProxy::Message::EXT_SUPPORTED_GROUPS,
+        TLSProxy::Message::CLIENT,
+        checkhandshake::DEFAULT_EXTENSIONS],
+    [TLSProxy::Message::MT_CLIENT_HELLO, TLSProxy::Message::EXT_EC_POINT_FORMATS,
+        TLSProxy::Message::CLIENT,
+        checkhandshake::DEFAULT_EXTENSIONS],
+    [TLSProxy::Message::MT_CLIENT_HELLO, TLSProxy::Message::EXT_SIG_ALGS,
+        TLSProxy::Message::CLIENT,
+        checkhandshake::DEFAULT_EXTENSIONS],
+    [TLSProxy::Message::MT_CLIENT_HELLO, TLSProxy::Message::EXT_ALPN,
+        TLSProxy::Message::CLIENT,
+        checkhandshake::ALPN_CLI_EXTENSION],
+    [TLSProxy::Message::MT_CLIENT_HELLO, TLSProxy::Message::EXT_SCT,
+        TLSProxy::Message::CLIENT,
+        checkhandshake::SCT_CLI_EXTENSION],
+    [TLSProxy::Message::MT_CLIENT_HELLO, TLSProxy::Message::EXT_ENCRYPT_THEN_MAC,
+        TLSProxy::Message::CLIENT,
+        checkhandshake::DEFAULT_EXTENSIONS],
+    [TLSProxy::Message::MT_CLIENT_HELLO, TLSProxy::Message::EXT_EXTENDED_MASTER_SECRET,
+        TLSProxy::Message::CLIENT,
+        checkhandshake::DEFAULT_EXTENSIONS],
+    [TLSProxy::Message::MT_CLIENT_HELLO, TLSProxy::Message::EXT_SESSION_TICKET,
+        TLSProxy::Message::CLIENT,
+        checkhandshake::DEFAULT_EXTENSIONS],
+    [TLSProxy::Message::MT_CLIENT_HELLO, TLSProxy::Message::EXT_KEY_SHARE,
+        TLSProxy::Message::CLIENT,
+        checkhandshake::DEFAULT_EXTENSIONS],
+    [TLSProxy::Message::MT_CLIENT_HELLO, TLSProxy::Message::EXT_SUPPORTED_VERSIONS,
+        TLSProxy::Message::CLIENT,
+        checkhandshake::DEFAULT_EXTENSIONS],
+    [TLSProxy::Message::MT_CLIENT_HELLO, TLSProxy::Message::EXT_PSK_KEX_MODES,
+        TLSProxy::Message::CLIENT,
+        checkhandshake::PSK_KEX_MODES_EXTENSION],
+    [TLSProxy::Message::MT_CLIENT_HELLO, TLSProxy::Message::EXT_PSK,
+        TLSProxy::Message::CLIENT,
+        checkhandshake::PSK_CLI_EXTENSION],
+    [TLSProxy::Message::MT_CLIENT_HELLO, TLSProxy::Message::EXT_RENEGOTIATE,
+        TLSProxy::Message::CLIENT,
+        checkhandshake::DEFAULT_EXTENSIONS],
+
+    [TLSProxy::Message::MT_SERVER_HELLO, TLSProxy::Message::EXT_SUPPORTED_VERSIONS,
+        TLSProxy::Message::SERVER,
+        checkhandshake::DEFAULT_EXTENSIONS],
+    [TLSProxy::Message::MT_SERVER_HELLO, TLSProxy::Message::EXT_KEY_SHARE,
+        TLSProxy::Message::SERVER,
         checkhandshake::KEY_SHARE_SRV_EXTENSION],
     [TLSProxy::Message::MT_SERVER_HELLO, TLSProxy::Message::EXT_PSK,
+        TLSProxy::Message::SERVER,
         checkhandshake::PSK_SRV_EXTENSION],
 
     [TLSProxy::Message::MT_CERTIFICATE, TLSProxy::Message::EXT_STATUS_REQUEST,
+        TLSProxy::Message::SERVER,
         checkhandshake::STATUS_REQUEST_SRV_EXTENSION],
-    [0,0,0]
+    [0,0,0,0]
 );
 
 use constant {
@@ -101,7 +180,7 @@ use constant {
     EMPTY_EXTENSION => 1,
     NON_DHE_KEX_MODE_ONLY => 2,
     DHE_KEX_MODE_ONLY => 3,
-    UNKNONW_KEX_MODES => 4,
+    UNKNOWN_KEX_MODES => 4,
     BOTH_KEX_MODES => 5
 };
 
@@ -114,28 +193,26 @@ my $proxy = TLSProxy::Proxy->new(
 
 #Test 1: First get a session
 (undef, my $session) = tempfile();
-$proxy->clientflags("-sess_out ".$session);
+$proxy->clientflags("-no_rx_cert_comp -sess_out ".$session);
+$proxy->serverflags("-no_rx_cert_comp -servername localhost");
 $proxy->sessionfile($session);
 $proxy->start() or plan skip_all => "Unable to start up Proxy for tests";
-plan tests => 7;
+plan tests => 13;
 ok(TLSProxy::Message->success(), "Initial connection");
 
-#Test 2: Attempt a resume with no kex modes extension. Should not resume
+#Test 2: Attempt a resume with no kex modes extension. Should fail (server
+#        MUST abort handshake with pre_shared key and no psk_kex_modes)
 $proxy->clear();
-$proxy->clientflags("-sess_in ".$session);
+$proxy->clientflags("-no_rx_cert_comp -sess_in ".$session);
 my $testtype = DELETE_EXTENSION;
 $proxy->filter(\&modify_kex_modes_filter);
 $proxy->start();
-checkhandshake($proxy, checkhandshake::DEFAULT_HANDSHAKE,
-               checkhandshake::DEFAULT_EXTENSIONS
-               | checkhandshake::KEY_SHARE_SRV_EXTENSION
-               | checkhandshake::PSK_CLI_EXTENSION,
-               "Resume with no kex modes");
+ok(TLSProxy::Message->fail(), "Resume with no kex modes");
 
 #Test 3: Attempt a resume with empty kex modes extension. Should fail (empty
 #        extension is invalid)
 $proxy->clear();
-$proxy->clientflags("-sess_in ".$session);
+$proxy->clientflags("-no_rx_cert_comp -sess_in ".$session);
 $testtype = EMPTY_EXTENSION;
 $proxy->start();
 ok(TLSProxy::Message->fail(), "Resume with empty kex modes");
@@ -143,7 +220,8 @@ ok(TLSProxy::Message->fail(), "Resume with empty kex modes");
 #Test 4: Attempt a resume with non-dhe kex mode only. Should resume without a
 #        key_share
 $proxy->clear();
-$proxy->clientflags("-sess_in ".$session);
+$proxy->clientflags("-no_rx_cert_comp -allow_no_dhe_kex -sess_in ".$session);
+$proxy->serverflags("-no_rx_cert_comp -allow_no_dhe_kex");
 $testtype = NON_DHE_KEX_MODE_ONLY;
 $proxy->start();
 checkhandshake($proxy, checkhandshake::RESUME_HANDSHAKE,
@@ -155,7 +233,7 @@ checkhandshake($proxy, checkhandshake::RESUME_HANDSHAKE,
 
 #Test 5: Attempt a resume with dhe kex mode only. Should resume with a key_share
 $proxy->clear();
-$proxy->clientflags("-sess_in ".$session);
+$proxy->clientflags("-no_rx_cert_comp -sess_in ".$session);
 $testtype = DHE_KEX_MODE_ONLY;
 $proxy->start();
 checkhandshake($proxy, checkhandshake::RESUME_HANDSHAKE,
@@ -167,21 +245,23 @@ checkhandshake($proxy, checkhandshake::RESUME_HANDSHAKE,
                "Resume with non-dhe kex mode");
 
 #Test 6: Attempt a resume with only unrecognised kex modes. Should not resume
+#        but rather fall back to full handshake
 $proxy->clear();
-$proxy->clientflags("-sess_in ".$session);
-$testtype = UNKNONW_KEX_MODES;
+$proxy->clientflags("-no_rx_cert_comp -sess_in ".$session);
+$testtype = UNKNOWN_KEX_MODES;
 $proxy->start();
 checkhandshake($proxy, checkhandshake::DEFAULT_HANDSHAKE,
                checkhandshake::DEFAULT_EXTENSIONS
                | checkhandshake::PSK_KEX_MODES_EXTENSION
                | checkhandshake::KEY_SHARE_SRV_EXTENSION
                | checkhandshake::PSK_CLI_EXTENSION,
-               "Resume with empty kex modes");
+               "Resume with unrecognized kex mode");
 
-#Test 7: Attempt a resume with both non-dhe and dhe kex mode. Should resume with
-#        a key_share
+#Test 7: Attempt a resume with both, non-dhe and dhe kex mode. Should resume with
+#        a key_share, even though non-dhe is allowed, but not explicitly preferred.
 $proxy->clear();
-$proxy->clientflags("-sess_in ".$session);
+$proxy->clientflags("-no_rx_cert_comp -allow_no_dhe_kex -sess_in ".$session);
+$proxy->serverflags("-allow_no_dhe_kex");
 $testtype = BOTH_KEX_MODES;
 $proxy->start();
 checkhandshake($proxy, checkhandshake::RESUME_HANDSHAKE,
@@ -190,7 +270,92 @@ checkhandshake($proxy, checkhandshake::RESUME_HANDSHAKE,
                | checkhandshake::KEY_SHARE_SRV_EXTENSION
                | checkhandshake::PSK_CLI_EXTENSION
                | checkhandshake::PSK_SRV_EXTENSION,
-               "Resume with non-dhe kex mode");
+               "Resume with both kex modes");
+
+#Test 8: Attempt a resume with both, non-dhe and dhe kex mode, but with server-side
+#        preference for non-dhe. Should resume without a key_share.
+$proxy->clear();
+$proxy->clientflags("-no_rx_cert_comp -allow_no_dhe_kex -sess_in ".$session);
+$proxy->serverflags("-allow_no_dhe_kex -prefer_no_dhe_kex");
+$testtype = BOTH_KEX_MODES;
+$proxy->start();
+checkhandshake($proxy, checkhandshake::RESUME_HANDSHAKE,
+               checkhandshake::DEFAULT_EXTENSIONS
+               | checkhandshake::PSK_KEX_MODES_EXTENSION
+               | checkhandshake::PSK_CLI_EXTENSION
+               | checkhandshake::PSK_SRV_EXTENSION,
+               "Resume with both kex modes, preference for non-dhe");
+
+#Test 9: Attempt a resume with both, non-dhe and dhe kex mode, with server-side
+#        preference for non-dhe, but non-dhe not allowed. Should resume with a key_share.
+$proxy->clear();
+$proxy->clientflags("-no_rx_cert_comp -allow_no_dhe_kex -sess_in ".$session);
+$proxy->serverflags("-prefer_no_dhe_kex");
+$testtype = BOTH_KEX_MODES;
+$proxy->start();
+checkhandshake($proxy, checkhandshake::RESUME_HANDSHAKE,
+               checkhandshake::DEFAULT_EXTENSIONS
+               | checkhandshake::PSK_KEX_MODES_EXTENSION
+               | checkhandshake::KEY_SHARE_SRV_EXTENSION
+               | checkhandshake::PSK_CLI_EXTENSION
+               | checkhandshake::PSK_SRV_EXTENSION,
+               "Resume with both kex modes, preference for but disabled non-dhe");
+
+#Test 10: Attempt a resume with both non-dhe and dhe kex mode, but unacceptable
+#        initial key_share. Should resume with a key_share following an HRR
+$proxy->clear();
+$proxy->clientflags("-no_rx_cert_comp -sess_in ".$session);
+$proxy->serverflags("-no_rx_cert_comp -curves P-384");
+$testtype = BOTH_KEX_MODES;
+$proxy->start();
+checkhandshake($proxy, checkhandshake::HRR_RESUME_HANDSHAKE,
+               checkhandshake::DEFAULT_EXTENSIONS
+               | checkhandshake::PSK_KEX_MODES_EXTENSION
+               | checkhandshake::KEY_SHARE_SRV_EXTENSION
+               | checkhandshake::KEY_SHARE_HRR_EXTENSION
+               | checkhandshake::PSK_CLI_EXTENSION
+               | checkhandshake::PSK_SRV_EXTENSION,
+               "Resume with both kex modes and HRR");
+
+#Test 11: Attempt a resume with dhe kex mode only and an unacceptable initial
+#        key_share. Should resume with a key_share following an HRR
+$proxy->clear();
+$proxy->clientflags("-no_rx_cert_comp -sess_in ".$session);
+$proxy->serverflags("-no_rx_cert_comp -curves P-384");
+$testtype = DHE_KEX_MODE_ONLY;
+$proxy->start();
+checkhandshake($proxy, checkhandshake::HRR_RESUME_HANDSHAKE,
+               checkhandshake::DEFAULT_EXTENSIONS
+               | checkhandshake::PSK_KEX_MODES_EXTENSION
+               | checkhandshake::KEY_SHARE_SRV_EXTENSION
+               | checkhandshake::KEY_SHARE_HRR_EXTENSION
+               | checkhandshake::PSK_CLI_EXTENSION
+               | checkhandshake::PSK_SRV_EXTENSION,
+               "Resume with dhe kex mode and HRR");
+
+#Test 12: Attempt a resume with both non-dhe and dhe kex mode, unacceptable
+#         initial key_share and no overlapping groups. Should resume without a
+#         key_share
+$proxy->clear();
+$proxy->clientflags("-no_rx_cert_comp -allow_no_dhe_kex -curves P-384 -sess_in ".$session);
+$proxy->serverflags("-no_rx_cert_comp -allow_no_dhe_kex -curves P-256");
+$testtype = BOTH_KEX_MODES;
+$proxy->start();
+checkhandshake($proxy, checkhandshake::RESUME_HANDSHAKE,
+               checkhandshake::DEFAULT_EXTENSIONS
+               | checkhandshake::PSK_KEX_MODES_EXTENSION
+               | checkhandshake::PSK_CLI_EXTENSION
+               | checkhandshake::PSK_SRV_EXTENSION,
+               "Resume with both kex modes, no overlapping groups");
+
+#Test 13: Attempt a resume with dhe kex mode only, unacceptable
+#         initial key_share and no overlapping groups. Should fail
+$proxy->clear();
+$proxy->clientflags("-no_rx_cert_comp -curves P-384 -sess_in ".$session);
+$proxy->serverflags("-no_rx_cert_comp -curves P-256");
+$testtype = DHE_KEX_MODE_ONLY;
+$proxy->start();
+ok(TLSProxy::Message->fail(), "Resume with dhe kex mode, no overlapping groups");
 
 unlink $session;
 
@@ -216,13 +381,13 @@ sub modify_kex_modes_filter
                 $ext = pack "C2",
                     0x01,       #List length
                     0x01;       #psk_dhe_ke
-            } elsif ($testtype == UNKNONW_KEX_MODES) {
+            } elsif ($testtype == UNKNOWN_KEX_MODES) {
                 $ext = pack "C3",
                     0x02,       #List length
                     0xfe,       #unknown
                     0xff;       #unknown
             } elsif ($testtype == BOTH_KEX_MODES) {
-                #We deliberately list psk_ke first...should still use psk_dhe_ke
+                #We deliberately list psk_ke first...should still use psk_dhe_ke, except if the server is configured otherwise.
                 $ext = pack "C3",
                     0x02,       #List length
                     0x00,       #psk_ke
